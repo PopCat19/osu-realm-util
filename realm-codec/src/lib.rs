@@ -46,7 +46,8 @@
 #![warn(missing_docs)]
 
 pub(crate) mod format;
-mod reader;
+#[allow(missing_docs)]
+pub mod reader;
 pub mod write;
 
 pub use write::{RealmBuilder, TableBuilder};

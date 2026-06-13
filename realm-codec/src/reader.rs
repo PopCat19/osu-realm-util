@@ -50,6 +50,16 @@ pub(crate) fn read_tables(data: &[u8]) -> Result<Vec<RealmTable>> {
 
 /// Parse the array at `offset` and return its elements as `Vec<u64>`.
 fn read_array(data: &[u8], offset: usize) -> Result<Vec<u64>> {
+    read_array_inner(data, offset)
+}
+
+/// Exposed for diagnostic probing — reads an array at `offset` without
+/// going through the table-level parser.
+pub fn read_array_for_debug(data: &[u8], offset: usize) -> Result<Vec<u64>> {
+    read_array_inner(data, offset)
+}
+
+fn read_array_inner(data: &[u8], offset: usize) -> Result<Vec<u64>> {
     if offset + NODE_HEADER_SIZE > data.len() {
         return Err(RealmError::InvalidFormat(format!(
             "array offset {offset:#x} out of bounds"
@@ -84,6 +94,23 @@ fn read_array(data: &[u8], offset: usize) -> Result<Vec<u64>> {
 }
 
 fn read_string_array_multiply(data: &[u8], offset: usize, slot_width: u8) -> Result<Vec<String>> {
+    read_string_array_multiply_inner(data, offset, slot_width)
+}
+
+/// Exposed for diagnostic probing — reads a multiply-encoded string array.
+pub fn read_string_array_for_debug(
+    data: &[u8],
+    offset: usize,
+    slot_width: u8,
+) -> Result<Vec<String>> {
+    read_string_array_multiply_inner(data, offset, slot_width)
+}
+
+fn read_string_array_multiply_inner(
+    data: &[u8],
+    offset: usize,
+    slot_width: u8,
+) -> Result<Vec<String>> {
     if offset + NODE_HEADER_SIZE > data.len() {
         return Err(RealmError::InvalidFormat(format!(
             "string array offset {offset:#x} out of bounds"
@@ -117,7 +144,16 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
         )));
     }
 
-    let col_names = read_string_array_multiply(data, spec_arr[1] as usize, 32)?;
+    let slot_width = {
+        let names_ref = spec_arr[1] as usize;
+        if names_ref + 8 > data.len() {
+            32
+        } else {
+            let nh = NodeHeader::parse(data[names_ref..names_ref + 8].try_into().unwrap());
+            nh.width
+        }
+    };
+    let col_names = read_string_array_multiply(data, spec_arr[1] as usize, slot_width)?;
     let col_type_ints = read_array(data, spec_arr[0] as usize)?;
 
     let columns: Vec<(String, ColumnType)> = col_names
@@ -129,15 +165,13 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
         })
         .collect();
 
-    // Realm SDK 5+ "cluster tree" format: spec_arr has ≥ 4 elements.
-    // table_arr = [spec_ref, cluster_root_ref] (only 2 elements).
+    // v24+ cluster tree: cluster root at table_arr[2] (index 1 is reserved).
     if spec_arr.len() >= 4 {
-        if table_arr.len() < 2 {
-            return Err(RealmError::InvalidFormat(format!(
-                "table '{name}' new-format table_arr too small"
-            )));
-        }
-        let cluster_root_ref = table_arr[1] as usize;
+        let cluster_root_ref = if table_arr.len() > 2 && table_arr[2] != 0 {
+            table_arr[2] as usize
+        } else {
+            table_arr[1] as usize
+        };
         let cluster_root = read_array(data, cluster_root_ref)?;
         return read_table_new(data, name, &columns, &col_type_ints, &cluster_root);
     }
@@ -197,26 +231,15 @@ fn read_table_new(
 
         let values: Vec<Value> = if col_ref == 0 {
             vec![]
+        } else if col_idx == 0 {
+            // Primary-key column (UUID): flat array of row indices
+            collect_ints_new(data, col_ref)
+                .into_iter()
+                .map(|v| Value::Int(v as i64))
+                .collect()
         } else {
-            match col_type {
-                ColumnType::String | ColumnType::Data => collect_strings_new(data, col_ref)
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-                ColumnType::Bool => collect_ints_new(data, col_ref)
-                    .into_iter()
-                    .map(|v| Value::Bool(v != 0))
-                    .collect(),
-                ColumnType::Int => collect_ints_new(data, col_ref)
-                    .into_iter()
-                    .map(|v| Value::Int(v as i64))
-                    .collect(),
-                ColumnType::Timestamp => collect_ints_new(data, col_ref)
-                    .into_iter()
-                    .map(|v| Value::Timestamp(v as i64))
-                    .collect(),
-                _ => vec![],
-            }
+            // Data column: root entry is a leaf-of-refs to per-row value nodes
+            collect_cluster_column_new(data, col_ref, *col_type)
         };
         col_values.push(values);
     }
@@ -252,8 +275,9 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
     for k in 1..col_idx {
         let ct = col_type_ints.get(k).copied().unwrap_or(0) as u8;
         match ct {
-            8 => ci += 2, // Timestamp: seconds + fractionals = 2 cluster slots
-            13 => {}      // BackLink: virtual, 0 cluster slots
+            8 => ci += 2,  // Timestamp: seconds + fractionals = 2 cluster slots
+            13 => {}       // BackLink: virtual, 0 cluster slots
+            17 => ci += 2, // UUID: 2 cluster slots (v24+)
             _ => ci += 1,
         }
     }
@@ -267,6 +291,104 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
 /// Inner nodes: `[offsets_tracking_ref, child_0, ..., child_{N-1}]`
 /// — element 0 is always the offsets-tracking node (skip).
 /// — garbage refs (misaligned addresses) are detected and skipped.
+/// Collect column values from a v24 cluster-tree column.
+///
+/// Data columns in v24 cluster trees use leaf-of-refs partitioning: the root
+/// entry is a ``wtype=0`` leaf whose 32-bit elements point to per-row value
+/// nodes. This function follows that chain.
+fn collect_cluster_column_new(data: &[u8], col_ref: usize, col_type: ColumnType) -> Vec<Value> {
+    if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
+        return vec![];
+    }
+    let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
+
+    if !hdr.is_inner && hdr.wtype == WTYPE_BITS && hdr.width == 32 && hdr.size < 200 {
+        // Leaf-of-refs: each element is a file offset to a per-row value node
+        let refs = match read_array(data, col_ref) {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+        let mut values = Vec::new();
+        for elem in refs {
+            let row_node_ref = elem as usize;
+            if row_node_ref == 0
+                || !row_node_ref.is_multiple_of(8)
+                || row_node_ref + NODE_HEADER_SIZE > data.len()
+            {
+                continue;
+            }
+            let row_hdr =
+                NodeHeader::parse(data[row_node_ref..row_node_ref + 8].try_into().unwrap());
+            if row_hdr.is_inner {
+                // Inner node: recurse into B+ tree (for large row blocks)
+                values.extend(collect_cluster_column_new(data, row_node_ref, col_type));
+            } else {
+                // Leaf: collect values from this row block
+                let block_vals = collect_leaf_values_new(data, row_node_ref, &row_hdr, col_type);
+                values.extend(block_vals);
+            }
+        }
+        values
+    } else if hdr.is_inner {
+        // Direct inner B+ tree (fallback for unpartitioned columns)
+        collect_ints_new(data, col_ref)
+            .into_iter()
+            .map(|v| value_from_int(v, col_type))
+            .collect()
+    } else {
+        // Direct leaf
+        collect_leaf_values_new(data, col_ref, &hdr, col_type)
+    }
+}
+
+fn collect_leaf_values_new(
+    data: &[u8],
+    leaf_ref: usize,
+    _hdr: &NodeHeader,
+    col_type: ColumnType,
+) -> Vec<Value> {
+    match col_type {
+        ColumnType::String | ColumnType::Data => collect_strings_new(data, leaf_ref)
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+        ColumnType::Bool => collect_ints_new(data, leaf_ref)
+            .into_iter()
+            .map(|v| Value::Bool(v != 0))
+            .collect(),
+        ColumnType::Int => collect_ints_new(data, leaf_ref)
+            .into_iter()
+            .map(|v| Value::Int(v as i64))
+            .collect(),
+        ColumnType::Timestamp => collect_ints_new(data, leaf_ref)
+            .into_iter()
+            .map(|v| Value::Timestamp(v as i64))
+            .collect(),
+        ColumnType::Float | ColumnType::Double | ColumnType::Unknown(10) => {
+            let ints = collect_ints_new(data, leaf_ref);
+            ints.into_iter()
+                .map(|v| Value::Float(f64::from_bits(v)))
+                .collect()
+        }
+        _ => {
+            let ints = collect_ints_new(data, leaf_ref);
+            ints.into_iter().map(|v| Value::Int(v as i64)).collect()
+        }
+    }
+}
+
+fn value_from_int(v: u64, col_type: ColumnType) -> Value {
+    match col_type {
+        ColumnType::Bool => Value::Bool(v != 0),
+        ColumnType::Int => Value::Int(v as i64),
+        ColumnType::Timestamp => Value::Timestamp(v as i64),
+        ColumnType::Float | ColumnType::Double | ColumnType::Unknown(10) => {
+            Value::Float(f64::from_bits(v))
+        }
+        _ => Value::Int(v as i64),
+    }
+}
+
 fn collect_strings_new(data: &[u8], col_ref: usize) -> Vec<String> {
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
         return vec![];
