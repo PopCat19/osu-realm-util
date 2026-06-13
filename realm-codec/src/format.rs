@@ -79,19 +79,19 @@ pub(crate) fn parse_file_header(data: &[u8]) -> crate::Result<(usize, u32)> {
 pub(crate) fn read_bits_elem(payload: &[u8], i: usize, width: u8) -> u64 {
     match width {
         0 => 0,
-        1 => ((payload[i / 8] >> (i % 8)) & 1) as u64,
-        2 => ((payload[i / 4] >> ((i % 4) * 2)) & 0x3) as u64,
-        4 => ((payload[i / 2] >> ((i % 2) * 4)) & 0xf) as u64,
-        8 => payload[i] as u64,
-        16 => {
+        1 if (i / 8) < payload.len() => ((payload[i / 8] >> (i % 8)) & 1) as u64,
+        2 if (i / 4) < payload.len() => ((payload[i / 4] >> ((i % 4) * 2)) & 0x3) as u64,
+        4 if (i / 2) < payload.len() => ((payload[i / 2] >> ((i % 2) * 4)) & 0xf) as u64,
+        8 if i < payload.len() => payload[i] as u64,
+        16 if i * 2 + 2 <= payload.len() => {
             let off = i * 2;
             u16::from_le_bytes(payload[off..off + 2].try_into().unwrap()) as u64
         }
-        32 => {
+        32 if i * 4 + 4 <= payload.len() => {
             let off = i * 4;
             u32::from_le_bytes(payload[off..off + 4].try_into().unwrap()) as u64
         }
-        64 => {
+        64 if i * 8 + 8 <= payload.len() => {
             let off = i * 8;
             u64::from_le_bytes(payload[off..off + 8].try_into().unwrap())
         }
@@ -103,7 +103,11 @@ pub(crate) fn read_bits_elem(payload: &[u8], i: usize, width: u8) -> u64 {
 pub(crate) fn multiply_elem_bytes(payload: &[u8], i: usize, width: u8) -> &[u8] {
     let w = width as usize;
     let off = i * w;
-    &payload[off..off + w]
+    if off >= payload.len() {
+        return &[];
+    }
+    let end = (off + w).min(payload.len());
+    &payload[off..end]
 }
 
 /// Decode a Realm short-string slot.

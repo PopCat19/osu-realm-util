@@ -68,15 +68,23 @@ fn read_array_inner(data: &[u8], offset: usize) -> Result<Vec<u64>> {
     let hdr = NodeHeader::parse(data[offset..offset + 8].try_into().unwrap());
     let payload = &data[offset + NODE_HEADER_SIZE..];
 
-    let mut elems = Vec::with_capacity(hdr.size);
+    // Clamp to avoid panic from bogus leaf headers.
+    let max_elems = match hdr.wtype {
+        WTYPE_MULTIPLY if hdr.width as usize > 0 => (payload.len() / hdr.width as usize) as u64,
+        _ if hdr.width > 0 => (payload.len() as u64 * 8) / hdr.width as u64,
+        _ => 0,
+    };
+    let size = (hdr.size as u64).min(max_elems).min(10_000_000) as usize;
+
+    let mut elems = Vec::with_capacity(size);
     match hdr.wtype {
         WTYPE_BITS => {
-            for i in 0..hdr.size {
+            for i in 0..size {
                 elems.push(read_bits_elem(payload, i, hdr.width));
             }
         }
         WTYPE_MULTIPLY => {
-            for i in 0..hdr.size {
+            for i in 0..size {
                 let slot = multiply_elem_bytes(payload, i, hdr.width);
                 let val = match hdr.width {
                     8 => u64::from_le_bytes(slot.try_into().unwrap_or([0u8; 8])),
@@ -167,13 +175,21 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
 
     // v24+ cluster tree: cluster root at table_arr[2] (index 1 is reserved).
     if spec_arr.len() >= 4 {
+        let col_attrs_raw = read_array(data, spec_arr[2] as usize).unwrap_or_default();
         let cluster_root_ref = if table_arr.len() > 2 && table_arr[2] != 0 {
             table_arr[2] as usize
         } else {
             table_arr[1] as usize
         };
         let cluster_root = read_array(data, cluster_root_ref)?;
-        return read_table_new(data, name, &columns, &col_type_ints, &cluster_root);
+        return read_table_new(
+            data,
+            name,
+            &columns,
+            &col_type_ints,
+            &col_attrs_raw,
+            &cluster_root,
+        );
     }
 
     // Old format: table_arr = [spec_ref, col_ref_0, col_ref_1, ...]
@@ -221,24 +237,32 @@ fn read_table_new(
     name: &str,
     columns: &[(String, ColumnType)],
     col_type_ints: &[u64],
+    col_attrs: &[u64],
     cluster_root: &[u64],
 ) -> Result<RealmTable> {
+    // Determine true row count from the PK column's leaf
+    let pk_ref = cluster_root.first().copied().unwrap_or(0) as usize;
+    let parent_rows: Vec<u64> = if pk_ref == 0 {
+        vec![]
+    } else {
+        collect_ints_new(data, pk_ref)
+    };
+
     let mut col_values: Vec<Vec<Value>> = Vec::with_capacity(columns.len());
 
     for (col_idx, (_, col_type)) in columns.iter().enumerate() {
         let ci = cluster_index_for_col(col_idx, col_type_ints);
         let col_ref = cluster_root.get(ci).copied().unwrap_or(0) as usize;
+        let attr = col_attrs.get(col_idx).copied().unwrap_or(0);
+        let is_list = (attr & 32) != 0;
 
         let values: Vec<Value> = if col_ref == 0 {
             vec![]
         } else if col_idx == 0 {
-            // Primary-key column (UUID): flat array of row indices
-            collect_ints_new(data, col_ref)
-                .into_iter()
-                .map(|v| Value::Int(v as i64))
-                .collect()
+            parent_rows.iter().map(|&v| Value::Int(v as i64)).collect()
+        } else if is_list {
+            collect_list_column_new(data, col_ref, *col_type, &parent_rows)
         } else {
-            // Data column: root entry is a leaf-of-refs to per-row value nodes
             collect_cluster_column_new(data, col_ref, *col_type)
         };
         col_values.push(values);
@@ -259,6 +283,100 @@ fn read_table_new(
         columns: columns.to_vec(),
         rows,
     })
+}
+
+/// Collect a list-type column where the root partition mirrors parent row
+/// count and each partition's sub-refs yield list elements per parent.
+fn collect_list_column_new(
+    data: &[u8],
+    col_ref: usize,
+    col_type: ColumnType,
+    _parent_rows: &[u64],
+) -> Vec<Value> {
+    if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
+        return vec![];
+    }
+    let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
+    if hdr.is_inner || !(hdr.wtype == WTYPE_BITS && hdr.width == 32 && hdr.size < 500) {
+        return collect_cluster_column_new(data, col_ref, col_type);
+    }
+
+    let partitions = read_array(data, col_ref).unwrap_or_default();
+    let mut result = Vec::with_capacity(partitions.len());
+
+    for &part_ref in &partitions {
+        let pr = part_ref as usize;
+        if pr == 0 || !pr.is_multiple_of(8) || pr + NODE_HEADER_SIZE > data.len() {
+            result.push(Value::Null);
+            continue;
+        }
+        let sub_refs = read_array(data, pr).unwrap_or_default();
+
+        // Detect compact string layout (offsets + blob + bitmap) vs generic follow-refs
+        let mut items = Vec::new();
+        if sub_refs.len() >= 2 {
+            let a = sub_refs[0] as usize;
+            let b = sub_refs[1] as usize;
+            if a != 0
+                && a.is_multiple_of(8)
+                && b != 0
+                && b.is_multiple_of(8)
+                && a + NODE_HEADER_SIZE <= data.len()
+                && b + NODE_HEADER_SIZE <= data.len()
+            {
+                let ah = NodeHeader::parse(data[a..a + 8].try_into().unwrap());
+                let bh = NodeHeader::parse(data[b..b + 8].try_into().unwrap());
+                if bh.wtype == WTYPE_IGNORE
+                    && (ah.width == 16 || ah.width == 8)
+                    && ah.wtype == WTYPE_BITS
+                {
+                    let compact_vals = read_partitioned_compact_string(data, &sub_refs);
+                    for v in compact_vals {
+                        if let Value::String(s) = v {
+                            items.push(s);
+                        }
+                    }
+                }
+            }
+        }
+
+        if items.is_empty() {
+            for &sr in &sub_refs {
+                let sref = sr as usize;
+                if sref == 0 || !sref.is_multiple_of(8) || sref + NODE_HEADER_SIZE > data.len() {
+                    continue;
+                }
+                let shdr = NodeHeader::parse(data[sref..sref + 8].try_into().unwrap());
+                if shdr.is_inner {
+                    continue;
+                }
+                if shdr.wtype == WTYPE_IGNORE {
+                    let blob = &data[sref + NODE_HEADER_SIZE..];
+                    let len = shdr.size.min(blob.len());
+                    for chunk in blob[..len].split(|&b| b == 0) {
+                        if !chunk.is_empty() {
+                            items.push(String::from_utf8_lossy(chunk).into_owned());
+                        }
+                    }
+                } else {
+                    let vals = collect_leaf_values_new(data, sref, &shdr, col_type);
+                    for v in vals {
+                        match v {
+                            Value::String(s) if !s.is_empty() => items.push(s),
+                            Value::Null => {}
+                            other => items.push(format!("{other:?}")),
+                        }
+                    }
+                }
+            }
+        }
+        result.push(if items.is_empty() {
+            Value::Null
+        } else {
+            Value::String(items.join("\n"))
+        });
+    }
+    result
 }
 
 /// Map a column index to its position in the cluster root array.
@@ -303,13 +421,39 @@ fn collect_cluster_column_new(data: &[u8], col_ref: usize, col_type: ColumnType)
     let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
 
     if !hdr.is_inner && hdr.wtype == WTYPE_BITS && hdr.width == 32 && hdr.size < 200 {
-        // Leaf-of-refs: each element is a file offset to a per-row value node
         let refs = match read_array(data, col_ref) {
             Ok(r) => r,
             Err(_) => return vec![],
         };
-        let mut values = Vec::new();
+
+        // Partitioned leaf-of-refs: detect compact-string offsets+blob layout.
+        if refs.len() >= 2 {
+            let a = refs[0] as usize;
+            let b = refs[1] as usize;
+            if a != 0
+                && a.is_multiple_of(8)
+                && b != 0
+                && b.is_multiple_of(8)
+                && a + 8 <= data.len()
+                && b + 8 <= data.len()
+            {
+                let ah = NodeHeader::parse(data[a..a + 8].try_into().unwrap());
+                let bh = NodeHeader::parse(data[b..b + 8].try_into().unwrap());
+                if bh.wtype == WTYPE_IGNORE
+                    && (ah.width == 16 || ah.width == 8)
+                    && ah.wtype == WTYPE_BITS
+                {
+                    return read_partitioned_compact_string(data, &refs);
+                }
+            }
+        }
+
+        // Generic leaf-of-refs: follow each ref as a leaf holding row-block values.
+        let mut values: Vec<Value> = Vec::new();
         for elem in refs {
+            if values.len() >= 200_000 {
+                break;
+            }
             let row_node_ref = elem as usize;
             if row_node_ref == 0
                 || !row_node_ref.is_multiple_of(8)
@@ -320,25 +464,54 @@ fn collect_cluster_column_new(data: &[u8], col_ref: usize, col_type: ColumnType)
             let row_hdr =
                 NodeHeader::parse(data[row_node_ref..row_node_ref + 8].try_into().unwrap());
             if row_hdr.is_inner {
-                // Inner node: recurse into B+ tree (for large row blocks)
                 values.extend(collect_cluster_column_new(data, row_node_ref, col_type));
             } else {
-                // Leaf: collect values from this row block
                 let block_vals = collect_leaf_values_new(data, row_node_ref, &row_hdr, col_type);
                 values.extend(block_vals);
             }
         }
-        values
-    } else if hdr.is_inner {
-        // Direct inner B+ tree (fallback for unpartitioned columns)
+        return values;
+    }
+
+    if hdr.is_inner {
         collect_ints_new(data, col_ref)
             .into_iter()
             .map(|v| value_from_int(v, col_type))
             .collect()
     } else {
-        // Direct leaf
         collect_leaf_values_new(data, col_ref, &hdr, col_type)
     }
+}
+
+/// Read a compact-string layout spread across multiple leaf-of-refs slots:
+/// slot[0] = offsets array (16-bit or 8-bit ints)
+/// slot[1] = blob (wtype=2 null-separated strings)
+/// slot[2] = null bitmap (wtype=0, 1-bit), optional
+fn read_partitioned_compact_string(data: &[u8], refs: &[u64]) -> Vec<Value> {
+    let offsets_ref = refs[0] as usize;
+    let blob_ref = refs[1] as usize;
+
+    let offsets = read_array(data, offsets_ref).unwrap_or_default();
+
+    let blob_hdr = NodeHeader::parse(data[blob_ref..blob_ref + 8].try_into().unwrap());
+    let blob_end = (blob_ref + NODE_HEADER_SIZE + blob_hdr.size).min(data.len());
+    let blob = &data[blob_ref + NODE_HEADER_SIZE..blob_end];
+
+    let mut values = Vec::with_capacity(offsets.len());
+    for r in 0..offsets.len() {
+        let start = if r == 0 { 0 } else { offsets[r - 1] as usize };
+        let raw_end = offsets[r] as usize;
+        let end = if raw_end > 0 {
+            (raw_end - 1).min(blob.len())
+        } else {
+            start
+        };
+        let start = start.min(end);
+        values.push(Value::String(
+            String::from_utf8_lossy(&blob[start..end]).into_owned(),
+        ));
+    }
+    values
 }
 
 fn collect_leaf_values_new(
@@ -390,7 +563,14 @@ fn value_from_int(v: u64, col_type: ColumnType) -> Value {
 }
 
 fn collect_strings_new(data: &[u8], col_ref: usize) -> Vec<String> {
+    collect_strings_new_depth(data, col_ref, 0)
+}
+
+fn collect_strings_new_depth(data: &[u8], col_ref: usize, depth: u32) -> Vec<String> {
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
+        return vec![];
+    }
+    if depth > 20 {
         return vec![];
     }
     let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
@@ -413,7 +593,7 @@ fn collect_strings_new(data: &[u8], col_ref: usize) -> Vec<String> {
             {
                 continue;
             }
-            result.extend(collect_strings_new(data, child_ref));
+            result.extend(collect_strings_new_depth(data, child_ref, depth + 1));
         }
         return result;
     }
@@ -538,7 +718,15 @@ fn read_wtype2_string(data: &[u8], str_ref: usize) -> Result<String> {
 /// Same inner-node layout as for strings: skip element 0 (offsets-tracking),
 /// filter garbage children by alignment.
 fn collect_ints_new(data: &[u8], col_ref: usize) -> Vec<u64> {
+    collect_ints_new_depth(data, col_ref, 0)
+}
+
+fn collect_ints_new_depth(data: &[u8], col_ref: usize, depth: u32) -> Vec<u64> {
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
+        return vec![];
+    }
+    // Guard against runaway recursion on large B+ trees.
+    if depth > 20 {
         return vec![];
     }
     let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
@@ -548,7 +736,7 @@ fn collect_ints_new(data: &[u8], col_ref: usize) -> Vec<u64> {
             Ok(c) => c,
             Err(_) => return vec![],
         };
-        let mut result = vec![];
+        let mut result = Vec::new();
         for (j, &child_u64) in children.iter().enumerate() {
             if j == 0 {
                 continue;
@@ -560,13 +748,20 @@ fn collect_ints_new(data: &[u8], col_ref: usize) -> Vec<u64> {
             {
                 continue;
             }
-            result.extend(collect_ints_new(data, child_ref));
+            let sub = collect_ints_new_depth(data, child_ref, depth + 1);
+            if result.len() + sub.len() > 50_000 {
+                break;
+            }
+            result.extend(sub);
         }
         return result;
     }
 
     if hdr.wtype == WTYPE_BITS && hdr.size < 100_000 {
-        read_array(data, col_ref).unwrap_or_default()
+        let max = 50_000_u64.min(hdr.size as u64) as usize;
+        let mut arr = read_array(data, col_ref).unwrap_or_default();
+        arr.truncate(max);
+        arr
     } else {
         vec![]
     }
