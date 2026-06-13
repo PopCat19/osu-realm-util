@@ -1,0 +1,3 @@
+[workspace]
+members = ["realm-codec", "osu-realm-extracter"]
+resolver = "2"

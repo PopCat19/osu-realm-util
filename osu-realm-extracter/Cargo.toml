@@ -1,0 +1,7 @@
+[package]
+name = "osu-realm-extracter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+realm-codec-rs = { package = "realm-codec-rs", path = "../realm-codec" }
