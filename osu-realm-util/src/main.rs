@@ -1,4 +1,5 @@
 // main.rs
+//
 // Purpose: CLI entry for osu-realm-util — dumps collections from both formats.
 
 mod collection;

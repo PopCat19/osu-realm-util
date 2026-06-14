@@ -19,6 +19,25 @@
       rec {
         formatter = pkgs.nixfmt;
 
+        packages = rec {
+          default = osu-realm-util;
+          osu-realm-util = pkgs.rustPlatform.buildRustPackage {
+            pname = "osu-realm-util";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            doCheck = false;
+            meta = with pkgs.lib; {
+              description = "Read osu! Realm databases and legacy collection.db files";
+              license = with licenses; [
+                mit
+                asl20
+              ];
+              mainProgram = "osu-realm-util";
+            };
+          };
+        };
+
         checks = {
           nixfmt = pkgs.runCommand "nixfmt-check" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
             nixfmt --check ${./flake.nix}

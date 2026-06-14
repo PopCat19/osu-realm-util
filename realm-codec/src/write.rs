@@ -1,14 +1,12 @@
-//! Write support: build Realm v9 binary files from scratch.
-//!
-//! The entry point is [`RealmBuilder`]. Tables and columns are declared via
-//! [`TableBuilder`], then the whole database is serialised to bytes or written
-//! to disk.
+// write.rs
 //
-//! This module:
-//! - Provides RealmBuilder and TableBuilder for declarative table construction
-//! - Encodes columnar data into Realm's NodeHeader + payload layout
-//! - Supports int, bool, string, timestamp, float, double column types
-//! - Includes roundtrip tests validating write-then-read correctness
+// Purpose: Write support: build Realm v9 binary files from scratch.
+//
+// This module:
+// - Provides RealmBuilder and TableBuilder for declarative table construction
+// - Encodes columnar data into Realm's NodeHeader + payload layout
+// - Supports int, bool, string, timestamp, float, double column types
+// - Includes roundtrip tests validating write-then-read correctness
 
 use std::path::Path;
 
