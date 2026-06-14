@@ -53,7 +53,7 @@ fn read_array(data: &[u8], offset: usize) -> Result<Vec<u64>> {
     read_array_inner(data, offset)
 }
 
-/// Exposed for diagnostic probing — reads an array at `offset` without
+/// Exposed for diagnostic probing - reads an array at `offset` without
 /// going through the table-level parser.
 pub fn read_array_for_debug(data: &[u8], offset: usize) -> Result<Vec<u64>> {
     read_array_inner(data, offset)
@@ -105,7 +105,7 @@ fn read_string_array_multiply(data: &[u8], offset: usize, slot_width: u8) -> Res
     read_string_array_multiply_inner(data, offset, slot_width)
 }
 
-/// Exposed for diagnostic probing — reads a multiply-encoded string array.
+/// Exposed for diagnostic probing - reads a multiply-encoded string array.
 pub fn read_string_array_for_debug(
     data: &[u8],
     offset: usize,
@@ -182,6 +182,21 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
             table_arr[1] as usize
         };
         let cluster_root = read_array(data, cluster_root_ref)?;
+        // realm-core v24+: root may be inner node ([key, depth, size, child0, ...])
+        // vs leaf node ([pk_col, pk_index, col1, col2, ...]).
+        // Detect inner root by reading the NodeHeader directly.
+        let root_is_inner = cluster_root_ref + NODE_HEADER_SIZE <= data.len()
+            && (data[cluster_root_ref + 4] & 0x80) != 0;
+        if root_is_inner {
+            return read_table_inner(
+                data,
+                name,
+                &columns,
+                &col_type_ints,
+                &col_attrs_raw,
+                &cluster_root,
+            );
+        }
         return read_table_new(
             data,
             name,
@@ -224,11 +239,101 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
 
 // ── New-format (cluster tree) table reader ────────────────────────────────────
 
-/// Build a `RealmTable` from a Realm SDK 5+ cluster-tree table.
+/// Build a `RealmTable` from a Realm SDK 5+ cluster-tree table with an inner root.
+///
+/// realm-core inner node layout:
+///   `[key_ref (idx 0), sub_tree_depth (idx 1), sub_tree_size (idx 2),`
+///    `child0 (idx 3), child1 (idx 4), ...]`
+///
+/// Each child is a leaf Cluster:
+///   `[key_ref_or_size (idx 0), col0 (idx 1), col1 (idx 2), ...]`
+///
+/// Columns map 1:1 - leaf[1+k] → column k.
+fn read_table_inner(
+    data: &[u8],
+    name: &str,
+    columns: &[(String, ColumnType)],
+    _col_type_ints: &[u64],
+    col_attrs: &[u64],
+    root_entries: &[u64],
+) -> Result<RealmTable> {
+    let n_children = root_entries.len().saturating_sub(3);
+    let mut col_values: Vec<Vec<Value>> = vec![vec![]; columns.len()];
+
+    for ci in 0..n_children {
+        let child_ref = root_entries[3 + ci] as usize;
+        if child_ref == 0
+            || !child_ref.is_multiple_of(8)
+            || child_ref + NODE_HEADER_SIZE > data.len()
+        {
+            continue;
+        }
+        let leaf = read_array(data, child_ref)?;
+        if leaf.len() < 2 {
+            continue;
+        }
+
+        let key_or_size = leaf[0];
+        let leaf_rows = if (key_or_size & 1) != 0 {
+            (key_or_size >> 1) as usize
+        } else {
+            let kref = key_or_size as usize;
+            if kref > 0 && kref.is_multiple_of(8) && kref + NODE_HEADER_SIZE <= data.len() {
+                read_array(data, kref).map(|a| a.len()).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        if leaf_rows == 0 {
+            continue;
+        }
+
+        for (col_idx, (_, col_type)) in columns.iter().enumerate() {
+            let entry_idx = 1 + col_idx;
+            if entry_idx >= leaf.len() {
+                let cur_len = col_values[col_idx].len();
+                col_values[col_idx].resize(cur_len + leaf_rows, Value::Null);
+                continue;
+            }
+            let col_ref = leaf[entry_idx] as usize;
+            let attr = col_attrs.get(col_idx).copied().unwrap_or(0);
+            let is_list = (attr & 32) != 0;
+
+            let mut vals: Vec<Value> = if col_ref == 0 {
+                vec![Value::Null; leaf_rows]
+            } else if is_list {
+                collect_list_column_new(data, col_ref, *col_type, &[])
+            } else {
+                collect_cluster_column_new(data, col_ref, *col_type)
+            };
+            vals.resize(leaf_rows, Value::Null);
+            vals.truncate(leaf_rows);
+            col_values[col_idx].extend(vals);
+        }
+    }
+
+    let row_count = col_values.iter().map(|v| v.len()).max().unwrap_or(0);
+    let mut rows = Vec::with_capacity(row_count);
+    for row_idx in 0..row_count {
+        let values: Vec<Value> = col_values
+            .iter()
+            .map(|cv| cv.get(row_idx).cloned().unwrap_or(Value::Null))
+            .collect();
+        rows.push(Row { values });
+    }
+
+    Ok(RealmTable {
+        name: name.to_string(),
+        columns: columns.to_vec(),
+        rows,
+    })
+}
+
+/// Build a `RealmTable` from a Realm SDK 5+ cluster-tree table with a leaf root.
 ///
 /// Cluster layout:
-///   `cluster[0]`   = col\[0\] (primary key column — always a string)
-///   `cluster[1]`   = pk_index B+ tree (skip — not a data column)
+///   `cluster[0]`   = col\[0\] (primary key column - always a string)
+///   `cluster[1]`   = pk_index B+ tree (skip - not a data column)
 ///   `cluster[2..]` = col\[1\], col\[2\], ...  with these exceptions:
 ///     type 8  (Timestamp) occupies 2 slots (seconds + fractionals)
 ///     type 13 (BackLink)  occupies 0 slots (virtual column, no cluster entry)
@@ -427,8 +532,9 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
 /// Collect all strings from a column's B+ tree (new format).
 ///
 /// Inner nodes: `[offsets_tracking_ref, child_0, ..., child_{N-1}]`
-/// — element 0 is always the offsets-tracking node (skip).
-/// — garbage refs (misaligned addresses) are detected and skipped.
+/// - element 0 is always the offsets-tracking node (skip).
+/// - garbage refs (misaligned addresses) are detected and skipped.
+///
 /// Collect column values from a v24 cluster-tree column.
 ///
 /// Data columns in v24 cluster trees use leaf-of-refs partitioning: the root
@@ -455,11 +561,19 @@ fn collect_cluster_column_new_inner(
     }
     let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
 
-    if !hdr.is_inner && hdr.wtype == WTYPE_BITS && hdr.width == 32 && hdr.size < 200 {
+    if !hdr.is_inner && hdr.wtype == WTYPE_BITS && hdr.width == 32 && hdr.size < 1000 {
         let refs = match read_array(data, col_ref) {
             Ok(r) => r,
             Err(_) => return vec![],
         };
+
+        // 32-bit leaf: could be file-offset refs or inline data (e.g. f32).
+        // If the first few elements are not 8-byte aligned, treat as raw data.
+        let looks_like_refs =
+            refs.len() >= 2 && refs.iter().take(3).all(|&r| r == 0 || r.is_multiple_of(8));
+        if !looks_like_refs {
+            return collect_leaf_values_new(data, col_ref, &hdr, col_type);
+        }
 
         // Partitioned leaf-of-refs: detect compact-string offsets+blob layout.
         if refs.len() >= 2 {
@@ -562,7 +676,7 @@ fn read_partitioned_compact_string(data: &[u8], refs: &[u64]) -> Vec<Value> {
 fn collect_leaf_values_new(
     data: &[u8],
     leaf_ref: usize,
-    _hdr: &NodeHeader,
+    hdr: &NodeHeader,
     col_type: ColumnType,
 ) -> Vec<Value> {
     match col_type {
@@ -574,6 +688,24 @@ fn collect_leaf_values_new(
             .into_iter()
             .map(|v| Value::Bool(v != 0))
             .collect(),
+        ColumnType::Float if hdr.wtype == WTYPE_BITS && hdr.width == 32 => {
+            let ints = collect_ints_new(data, leaf_ref);
+            ints.into_iter()
+                .map(|v| Value::Float(f32::from_bits(v as u32) as f64))
+                .collect()
+        }
+        ColumnType::Float if hdr.wtype == WTYPE_MULTIPLY && hdr.width == 4 => {
+            read_multiply_f32_leaf(data, leaf_ref, hdr)
+        }
+        ColumnType::Double if hdr.wtype == WTYPE_MULTIPLY && hdr.width == 8 => {
+            read_multiply_f64_leaf(data, leaf_ref, hdr)
+        }
+        ColumnType::Float | ColumnType::Double => {
+            let ints = collect_ints_new(data, leaf_ref);
+            ints.into_iter()
+                .map(|v| Value::Float(f64::from_bits(v)))
+                .collect()
+        }
         ColumnType::Int => collect_ints_new(data, leaf_ref)
             .into_iter()
             .map(|v| Value::Int(v as i64))
@@ -582,17 +714,45 @@ fn collect_leaf_values_new(
             .into_iter()
             .map(|v| Value::Timestamp(v as i64))
             .collect(),
-        ColumnType::Float | ColumnType::Double => {
-            let ints = collect_ints_new(data, leaf_ref);
-            ints.into_iter()
-                .map(|v| Value::Float(f64::from_bits(v)))
-                .collect()
-        }
         _ => {
             let ints = collect_ints_new(data, leaf_ref);
             ints.into_iter().map(|v| Value::Int(v as i64)).collect()
         }
     }
+}
+
+fn read_multiply_f32_leaf(data: &[u8], leaf_ref: usize, hdr: &NodeHeader) -> Vec<Value> {
+    let payload_start = leaf_ref + NODE_HEADER_SIZE;
+    let needed = hdr.size * hdr.width as usize;
+    if payload_start + needed > data.len() {
+        return (0..hdr.size).map(|_| Value::Null).collect();
+    }
+    let payload = &data[payload_start..];
+    (0..hdr.size)
+        .map(|i| {
+            let off = i * 4;
+            let bytes: [u8; 4] = payload[off..off + 4].try_into().unwrap_or([0; 4]);
+            let f = f32::from_le_bytes(bytes);
+            Value::Float(f as f64)
+        })
+        .collect()
+}
+
+fn read_multiply_f64_leaf(data: &[u8], leaf_ref: usize, hdr: &NodeHeader) -> Vec<Value> {
+    let payload_start = leaf_ref + NODE_HEADER_SIZE;
+    let needed = hdr.size * hdr.width as usize;
+    if payload_start + needed > data.len() {
+        return (0..hdr.size).map(|_| Value::Null).collect();
+    }
+    let payload = &data[payload_start..];
+    (0..hdr.size)
+        .map(|i| {
+            let off = i * 8;
+            let bytes: [u8; 8] = payload[off..off + 8].try_into().unwrap_or([0; 8]);
+            let f = f64::from_le_bytes(bytes);
+            Value::Float(f)
+        })
+        .collect()
 }
 
 fn value_from_int(v: u64, col_type: ColumnType) -> Value {
@@ -644,9 +804,9 @@ fn collect_strings_new(data: &[u8], col_ref: usize) -> Vec<String> {
 /// Dispatch to the correct leaf reader based on node shape.
 ///
 /// Three leaf types observed in Realm 5+ string columns:
-///   1. Compact string  — `wtype=0, size ∈ {2,3}`: `[offsets_ref, blob_ref]`
-///   2. Per-row refs    — `wtype=0, width ≥ 16, size > 3`: each elem → wtype=2 node
-///   3. Inline strings  — `wtype=1`: fixed-width slots, `decode_short_string` encoding
+///   1. Compact string  - `wtype=0, size ∈ {2,3}`: `[offsets_ref, blob_ref]`
+///   2. Per-row refs    - `wtype=0, width ≥ 16, size > 3`: each elem → wtype=2 node
+///   3. Inline strings  - `wtype=1`: fixed-width slots, `decode_short_string` encoding
 fn collect_string_leaf(data: &[u8], leaf_ref: usize, hdr: &NodeHeader) -> Vec<String> {
     match hdr.wtype {
         WTYPE_BITS => {
@@ -794,6 +954,24 @@ fn collect_ints_new(data: &[u8], col_ref: usize) -> Vec<u64> {
             let mut arr = read_array(data, ref_addr).unwrap_or_default();
             arr.truncate(max);
             result.extend(arr);
+        } else if hdr.wtype == WTYPE_MULTIPLY && hdr.width > 0 && hdr.size < 100_000 {
+            let payload_start = ref_addr + NODE_HEADER_SIZE;
+            let needed = hdr.size * hdr.width as usize;
+            if payload_start + needed > data.len() {
+                continue;
+            }
+            let payload = &data[payload_start..];
+            for i in 0..hdr.size {
+                let slot = multiply_elem_bytes(payload, i, hdr.width);
+                let val = match hdr.width {
+                    8 => u64::from_le_bytes(slot.try_into().unwrap_or([0u8; 8])),
+                    4 => u32::from_le_bytes(slot.try_into().unwrap_or([0u8; 4])) as u64,
+                    2 => u16::from_le_bytes(slot.try_into().unwrap_or([0u8; 2])) as u64,
+                    1 => slot[0] as u64,
+                    _ => 0,
+                };
+                result.push(val);
+            }
         }
     }
     result
