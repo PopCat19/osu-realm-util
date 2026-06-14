@@ -12,7 +12,7 @@
 
 use crate::format::{
     decode_short_string, multiply_elem_bytes, parse_file_header, read_bits_elem, NodeHeader,
-    NODE_HEADER_SIZE, WTYPE_BITS, WTYPE_IGNORE, WTYPE_MULTIPLY,
+    NODE_HEADER_SIZE, WTYPE_BITS, WTYPE_IGNORE, WTYPE_LINKLIST, WTYPE_MULTIPLY,
 };
 use crate::{ColumnType, RealmError, RealmTable, Result, Row, Value};
 
@@ -347,15 +347,29 @@ fn collect_list_column_new(
                     continue;
                 }
                 let shdr = NodeHeader::parse(data[sref..sref + 8].try_into().unwrap());
-                if shdr.is_inner {
+                if shdr.is_inner || shdr.wtype == WTYPE_LINKLIST {
                     continue;
                 }
                 if shdr.wtype == WTYPE_IGNORE {
+                    // Realm files can contain inline binary blobs (3-10MB png/wav).
+                    // Real string values never exceed a few KB; cap at 64KB and read
+                    // only the first null-terminated segment.
+                    if shdr.size > 65536 {
+                        continue;
+                    }
                     let blob = &data[sref + NODE_HEADER_SIZE..];
                     let len = shdr.size.min(blob.len());
-                    for chunk in blob[..len].split(|&b| b == 0) {
-                        if !chunk.is_empty() {
-                            items.push(String::from_utf8_lossy(chunk).into_owned());
+                    if let Some(null_pos) = blob[..len].iter().position(|&b| b == 0) {
+                        if null_pos > 0 {
+                            let s = String::from_utf8_lossy(&blob[..null_pos]);
+                            if !s.is_empty() {
+                                items.push(s.into_owned());
+                            }
+                        }
+                    } else if len > 0 {
+                        let s = String::from_utf8_lossy(&blob[..len]);
+                        if !s.is_empty() {
+                            items.push(s.into_owned());
                         }
                     }
                 } else {

@@ -21,6 +21,7 @@ pub(crate) const NODE_HEADER_SIZE: usize = 8;
 pub(crate) const WTYPE_BITS: u8 = 0;
 pub(crate) const WTYPE_MULTIPLY: u8 = 1;
 pub(crate) const WTYPE_IGNORE: u8 = 2; // raw bytes; `size` field = byte count
+pub(crate) const WTYPE_LINKLIST: u8 = 3; // Mixed/typed payload node (observed in v24)
 
 /// Parsed 8-byte Realm NodeHeader (internal representation).
 #[derive(Debug, Clone)]

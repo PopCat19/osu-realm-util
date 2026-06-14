@@ -2,11 +2,6 @@
 //
 // Purpose: CLI entry point for osu-realm-extracter — opens a Realm database
 // and dumps table metadata.
-//
-// This module:
-// - Parses the first positional arg as the path to a .realm file
-// - Defaults to ~/.local/share/osu/client.realm
-// - Reports table names, row counts, column names, and health status
 
 extern crate realm_codec_rs;
 use realm_codec_rs::RealmFile;
@@ -16,6 +11,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "/home/popcat19/.local/share/osu/client.realm".into());
 
+    let t0 = std::time::Instant::now();
     let realm = match RealmFile::open(&path) {
         Ok(r) => r,
         Err(e) => {
@@ -23,6 +19,7 @@ fn main() {
             return;
         }
     };
+    eprintln!("Parse: {:.1}s total", t0.elapsed().as_secs_f64());
 
     for t in realm.tables().iter() {
         let cols_bad = t
@@ -31,12 +28,12 @@ fn main() {
             .filter(|(n, _)| n.is_empty() || n.starts_with('\0') || n.len() >= 100)
             .count();
         let status = if cols_bad > 0 {
-            "\u{26a0}  garbled cols"
+            "⚠  garbled cols"
         } else if t.rows.is_empty()
             && !t.columns.is_empty()
             && t.name != "dotnet_guid_representation_fixed"
         {
-            "\u{2717}  empty"
+            "✗  empty"
         } else {
             ""
         };
