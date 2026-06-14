@@ -70,22 +70,29 @@ impl CollectionDb {
 
     pub fn parse(mut buf: &[u8]) -> Result<Self, CollectionDbError> {
         let version = read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("version"))?;
-        let count = read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("collection count"))?;
+        let count =
+            read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("collection count"))?;
         let mut collections = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let name = read_osu_string(&mut buf)
                 .map_err(|_| CollectionDbError::Truncated("collection name"))?;
-            let beatmap_count = read_i32(&mut buf)
-                .map_err(|_| CollectionDbError::Truncated("beatmap count"))?;
+            let beatmap_count =
+                read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("beatmap count"))?;
             let mut beatmap_hashes = Vec::with_capacity(beatmap_count as usize);
             for _ in 0..beatmap_count {
                 let hash = read_osu_string(&mut buf)
                     .map_err(|_| CollectionDbError::Truncated("beatmap hash"))?;
                 beatmap_hashes.push(hash);
             }
-            collections.push(Collection { name, beatmap_hashes });
+            collections.push(Collection {
+                name,
+                beatmap_hashes,
+            });
         }
-        Ok(Self { version, collections })
+        Ok(Self {
+            version,
+            collections,
+        })
     }
 }
 
