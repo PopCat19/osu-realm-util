@@ -1,7 +1,7 @@
 // main.rs
 //
 // Purpose: CLI entry point for osu-realm-extracter — opens a Realm database
-// and dumps table metadata with row/column health indicators.
+// and dumps table metadata.
 //
 // This module:
 // - Parses the first positional arg as the path to a .realm file
@@ -30,12 +30,11 @@ fn main() {
     let mut tables_broken = 0u32;
 
     for t in realm.tables().iter() {
-        let cols_ok = t
+        let cols_bad = t
             .columns
             .iter()
-            .filter(|(n, _)| !n.is_empty() && !n.starts_with('\0') && n.len() < 100)
+            .filter(|(n, _)| n.is_empty() || n.starts_with('\0') || n.len() >= 100)
             .count();
-        let cols_bad = t.columns.len() - cols_ok;
         let status = if cols_bad > 0 {
             tables_partial += 1;
             "\u{26a0}  garbled cols"

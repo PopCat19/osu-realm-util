@@ -415,6 +415,21 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
 /// entry is a ``wtype=0`` leaf whose 32-bit elements point to per-row value
 /// nodes. This function follows that chain.
 fn collect_cluster_column_new(data: &[u8], col_ref: usize, col_type: ColumnType) -> Vec<Value> {
+    let val_cap = 500_000;
+    collect_cluster_column_new_inner(data, col_ref, col_type, 0, &mut 0u32, val_cap)
+}
+
+fn collect_cluster_column_new_inner(
+    data: &[u8],
+    col_ref: usize,
+    col_type: ColumnType,
+    depth: u32,
+    total_out: &mut u32,
+    cap: u32,
+) -> Vec<Value> {
+    if *total_out >= cap || depth > 30 {
+        return vec![];
+    }
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
         return vec![];
     }
@@ -464,10 +479,19 @@ fn collect_cluster_column_new(data: &[u8], col_ref: usize, col_type: ColumnType)
             let row_hdr =
                 NodeHeader::parse(data[row_node_ref..row_node_ref + 8].try_into().unwrap());
             if row_hdr.is_inner {
-                values.extend(collect_cluster_column_new(data, row_node_ref, col_type));
+                let sub = collect_cluster_column_new_inner(
+                    data,
+                    row_node_ref,
+                    col_type,
+                    depth + 1,
+                    total_out,
+                    cap,
+                );
+                values.extend(sub);
             } else {
                 let block_vals = collect_leaf_values_new(data, row_node_ref, &row_hdr, col_type);
                 values.extend(block_vals);
+                *total_out += block_vals.len() as u32;
             }
         }
         return values;
@@ -563,42 +587,39 @@ fn value_from_int(v: u64, col_type: ColumnType) -> Value {
 }
 
 fn collect_strings_new(data: &[u8], col_ref: usize) -> Vec<String> {
-    collect_strings_new_depth(data, col_ref, 0)
-}
-
-fn collect_strings_new_depth(data: &[u8], col_ref: usize, depth: u32) -> Vec<String> {
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
         return vec![];
     }
-    if depth > 20 {
-        return vec![];
-    }
-    let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
-
-    if hdr.is_inner {
-        let children = match read_array(data, col_ref) {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        let mut result = vec![];
-        for (j, &child_u64) in children.iter().enumerate() {
-            if j == 0 {
-                continue; // always the offsets-tracking ref
-            }
-            let child_ref = child_u64 as usize;
-            // Realm nodes are always 8-byte aligned; misaligned = garbage
-            if child_ref == 0
-                || !child_ref.is_multiple_of(8)
-                || child_ref + NODE_HEADER_SIZE > data.len()
-            {
-                continue;
-            }
-            result.extend(collect_strings_new_depth(data, child_ref, depth + 1));
+    let mut result = vec![];
+    let mut queue = vec![col_ref];
+    while let Some(ref_addr) = queue.pop() {
+        if ref_addr == 0 || !ref_addr.is_multiple_of(8) || ref_addr + NODE_HEADER_SIZE > data.len()
+        {
+            continue;
         }
-        return result;
+        let hdr = NodeHeader::parse(data[ref_addr..ref_addr + 8].try_into().unwrap());
+        if hdr.is_inner {
+            let children = match read_array(data, ref_addr) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (j, &child_u64) in children.iter().enumerate() {
+                if j == 0 {
+                    continue;
+                }
+                let child_ref = child_u64 as usize;
+                if child_ref != 0
+                    && child_ref.is_multiple_of(8)
+                    && child_ref + NODE_HEADER_SIZE <= data.len()
+                {
+                    queue.push(child_ref);
+                }
+            }
+        } else {
+            result.extend(collect_string_leaf(data, ref_addr, &hdr));
+        }
     }
-
-    collect_string_leaf(data, col_ref, &hdr)
+    result
 }
 
 /// Dispatch to the correct leaf reader based on node shape.
@@ -718,53 +739,45 @@ fn read_wtype2_string(data: &[u8], str_ref: usize) -> Result<String> {
 /// Same inner-node layout as for strings: skip element 0 (offsets-tracking),
 /// filter garbage children by alignment.
 fn collect_ints_new(data: &[u8], col_ref: usize) -> Vec<u64> {
-    collect_ints_new_depth(data, col_ref, 0)
-}
-
-fn collect_ints_new_depth(data: &[u8], col_ref: usize, depth: u32) -> Vec<u64> {
     if col_ref == 0 || !col_ref.is_multiple_of(8) || col_ref + NODE_HEADER_SIZE > data.len() {
         return vec![];
     }
-    // Guard against runaway recursion on large B+ trees.
-    if depth > 20 {
-        return vec![];
-    }
-    let hdr = NodeHeader::parse(data[col_ref..col_ref + 8].try_into().unwrap());
-
-    if hdr.is_inner {
-        let children = match read_array(data, col_ref) {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        let mut result = Vec::new();
-        for (j, &child_u64) in children.iter().enumerate() {
-            if j == 0 {
-                continue;
-            }
-            let child_ref = child_u64 as usize;
-            if child_ref == 0
-                || !child_ref.is_multiple_of(8)
-                || child_ref + NODE_HEADER_SIZE > data.len()
-            {
-                continue;
-            }
-            let sub = collect_ints_new_depth(data, child_ref, depth + 1);
-            if result.len() + sub.len() > 50_000 {
-                break;
-            }
-            result.extend(sub);
+    let mut result = Vec::new();
+    let mut queue = vec![col_ref];
+    while let Some(ref_addr) = queue.pop() {
+        if result.len() >= 50_000 {
+            break;
         }
-        return result;
+        if ref_addr == 0 || !ref_addr.is_multiple_of(8) || ref_addr + NODE_HEADER_SIZE > data.len()
+        {
+            continue;
+        }
+        let hdr = NodeHeader::parse(data[ref_addr..ref_addr + 8].try_into().unwrap());
+        if hdr.is_inner {
+            let children = match read_array(data, ref_addr) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (j, &child_u64) in children.iter().enumerate() {
+                if j == 0 {
+                    continue;
+                }
+                let child_ref = child_u64 as usize;
+                if child_ref != 0
+                    && child_ref.is_multiple_of(8)
+                    && child_ref + NODE_HEADER_SIZE <= data.len()
+                {
+                    queue.push(child_ref);
+                }
+            }
+        } else if hdr.wtype == WTYPE_BITS && hdr.size < 100_000 {
+            let max = 50_000_u64.min(hdr.size as u64) as usize;
+            let mut arr = read_array(data, ref_addr).unwrap_or_default();
+            arr.truncate(max);
+            result.extend(arr);
+        }
     }
-
-    if hdr.wtype == WTYPE_BITS && hdr.size < 100_000 {
-        let max = 50_000_u64.min(hdr.size as u64) as usize;
-        let mut arr = read_array(data, col_ref).unwrap_or_default();
-        arr.truncate(max);
-        arr
-    } else {
-        vec![]
-    }
+    result
 }
 
 // ── Old-format: row count + cell reading ──────────────────────────────────────
