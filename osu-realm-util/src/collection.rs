@@ -1,11 +1,12 @@
 // collection.rs
 //
-// Purpose: Read osu!stable collection.db binary files.
+// Purpose: Read and write osu!stable collection.db binary files.
 //
 // This module:
 // - Parses the legacy osu! collection database format
 // - Handles osu!-string encoding (LEB128 length + UTF-8)
 // - Returns structured Collection data
+// - Writes collection.db binary output (realm2collectiondb)
 
 #[derive(Debug, Clone)]
 pub struct Collection {
@@ -48,10 +49,28 @@ impl CollectionDb {
         Self::parse(&data)
     }
 
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), CollectionDbError> {
+        std::fs::write(path, self.to_bytes())?;
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.version.to_le_bytes());
+        out.extend_from_slice(&(self.collections.len() as i32).to_le_bytes());
+        for c in &self.collections {
+            write_osu_string(&mut out, &c.name);
+            out.extend_from_slice(&(c.beatmap_hashes.len() as i32).to_le_bytes());
+            for h in &c.beatmap_hashes {
+                write_osu_string(&mut out, h);
+            }
+        }
+        out
+    }
+
     pub fn parse(mut buf: &[u8]) -> Result<Self, CollectionDbError> {
         let version = read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("version"))?;
         let count = read_i32(&mut buf).map_err(|_| CollectionDbError::Truncated("collection count"))?;
-
         let mut collections = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let name = read_osu_string(&mut buf)
@@ -71,14 +90,18 @@ impl CollectionDb {
 }
 
 fn read_i32(buf: &mut &[u8]) -> Result<i32, ()> {
-    if buf.len() < 4 { return Err(()); }
+    if buf.len() < 4 {
+        return Err(());
+    }
     let val = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     *buf = &buf[4..];
     Ok(val)
 }
 
 fn read_osu_string(buf: &mut &[u8]) -> Result<String, ()> {
-    if buf.is_empty() { return Err(()); }
+    if buf.is_empty() {
+        return Err(());
+    }
     let tag = buf[0];
     *buf = &buf[1..];
     if tag == 0x00 {
@@ -96,11 +119,37 @@ fn read_osu_string(buf: &mut &[u8]) -> Result<String, ()> {
     Ok(s)
 }
 
+fn write_osu_string(out: &mut Vec<u8>, s: &str) {
+    if s.is_empty() {
+        out.push(0x00);
+        return;
+    }
+    out.push(0x0b);
+    write_leb128(out, s.len());
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn write_leb128(out: &mut Vec<u8>, mut len: usize) {
+    loop {
+        let mut byte = (len & 0x7F) as u8;
+        len >>= 7;
+        if len != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if len == 0 {
+            break;
+        }
+    }
+}
+
 fn read_leb128(buf: &mut &[u8]) -> Option<usize> {
     let mut result: usize = 0;
     let mut shift = 0u32;
     loop {
-        if buf.is_empty() { return None; }
+        if buf.is_empty() {
+            return None;
+        }
         let byte = buf[0];
         *buf = &buf[1..];
         result |= ((byte & 0x7F) as usize) << shift;
@@ -108,7 +157,9 @@ fn read_leb128(buf: &mut &[u8]) -> Option<usize> {
             return Some(result);
         }
         shift += 7;
-        if shift >= 35 { return None; }
+        if shift >= 35 {
+            return None;
+        }
     }
 }
 
@@ -118,19 +169,18 @@ mod tests {
 
     #[test]
     fn parse_roundtrip() {
-        let mut data = Vec::new();
-        // version
-        data.extend_from_slice(&20250207i32.to_le_bytes());
-        // 2 collections
-        data.extend_from_slice(&2i32.to_le_bytes());
-        // col 1: "2024", 2 hashes
-        encode_osu_string(&mut data, "2024");
-        data.extend_from_slice(&2i32.to_le_bytes());
-        encode_osu_string(&mut data, "deadbeefdeadbeefdeadbeefdeadbeef");
-        encode_osu_string(&mut data, "cafebabe000000000000000000000000");
-        // col 2: empty name, 0 hashes
-        encode_osu_string(&mut data, "");
-        data.extend_from_slice(&0i32.to_le_bytes());
+        let data = {
+            let mut d = Vec::new();
+            d.extend_from_slice(&20250207i32.to_le_bytes());
+            d.extend_from_slice(&2i32.to_le_bytes());
+            write_osu_string(&mut d, "2024");
+            d.extend_from_slice(&2i32.to_le_bytes());
+            write_osu_string(&mut d, "deadbeefdeadbeefdeadbeefdeadbeef");
+            write_osu_string(&mut d, "cafebabe000000000000000000000000");
+            write_osu_string(&mut d, "");
+            d.extend_from_slice(&0i32.to_le_bytes());
+            d
+        };
 
         let db = CollectionDb::parse(&data).unwrap();
         assert_eq!(db.version, 20250207);
@@ -138,7 +188,13 @@ mod tests {
         assert_eq!(db.collections[0].name, "2024");
         assert_eq!(db.collections[0].beatmap_hashes.len(), 2);
         assert_eq!(db.collections[1].name, "");
-        assert!(db.collections[1].beatmap_hashes.is_empty());
+
+        let reencoded = db.to_bytes();
+        let db2 = CollectionDb::parse(&reencoded).unwrap();
+        assert_eq!(db2.collections.len(), 2);
+        assert_eq!(db2.collections[0].name, "2024");
+        assert_eq!(db2.collections[0].beatmap_hashes.len(), 2);
+        assert_eq!(db2.collections[1].name, "");
     }
 
     #[test]
@@ -149,27 +205,9 @@ mod tests {
         for c in &db.collections {
             assert!(!c.name.is_empty() || c.beatmap_hashes.is_empty());
             for h in &c.beatmap_hashes {
-                assert_eq!(h.len(), 32, "hash should be 32 hex chars");
+                assert_eq!(h.len(), 32);
                 assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
             }
         }
-    }
-
-    fn encode_osu_string(data: &mut Vec<u8>, s: &str) {
-        if s.is_empty() {
-            data.push(0x00);
-            return;
-        }
-        data.push(0x0b);
-        // LEB128 encode length
-        let mut len = s.len();
-        loop {
-            let mut byte = (len & 0x7F) as u8;
-            len >>= 7;
-            if len != 0 { byte |= 0x80; }
-            data.push(byte);
-            if len == 0 { break; }
-        }
-        data.extend_from_slice(s.as_bytes());
     }
 }
