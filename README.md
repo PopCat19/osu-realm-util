@@ -48,14 +48,23 @@ osu-realm-util/          monorepo root
 ## Nix
 
 ```nix
+# Run without installing
+nix run github:PopCat19/osu-realm-util
+nix run github:PopCat19/osu-realm-util -- col
+nix run github:PopCat19/osu-realm-util -- realm2col /tmp/out.db
+nix run github:PopCat19/osu-realm-util -- merge /tmp/out.db
+
+# Install to profile
+nix profile install github:PopCat19/osu-realm-util
+
+# Flake input in another flake
+inputs.osu-realm-util.url = "github:PopCat19/osu-realm-util";
+
 # Dev shell
 nix develop
 
-# Build
+# Build locally
 nix build
-
-# Run
-nix run
 ```
 
 ## License
