@@ -407,14 +407,15 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
     if col_idx == 0 {
         return 0;
     }
-    // col[1] starts at cluster[2] (cluster[0]=pk_col, cluster[1]=pk_index)
+    // cluster[0] = pk_col, cluster[1] = pk_index (B+ tree, skipped).
+    // Data columns start at cluster[2].
     let mut ci = 2usize;
     for k in 1..col_idx {
         let ct = col_type_ints.get(k).copied().unwrap_or(0) as u8;
         match ct {
             8 => ci += 2,  // Timestamp: seconds + nanoseconds = 2 cluster slots
             14 => {}       // BackLink: virtual column, 0 cluster slots
-            17 => ci += 2, // UUID: 2 cluster slots (v24+)
+            17 => ci += 2, // UUID: 2 cluster slots
             _ => ci += 1,
         }
     }
