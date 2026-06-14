@@ -397,7 +397,12 @@ fn collect_list_column_new(
 ///
 /// col\[0\] → cluster\[0\]; pk_index at cluster\[1\] is skipped.
 /// For col\[k ≥ 1\]: start at cluster\[2\] and account for multi-slot types
-/// encountered in cols 1..k-1 (type 8 = 2 slots, type 13 = 0 slots).
+/// encountered in cols 1..k-1.
+///
+/// Multi-slot types (realm-core native codes):
+///   8  = Timestamp (2 slots: seconds + nanoseconds)
+///   17 = UUID      (2 slots: hi64 + lo64)
+///   14 = BackLink  (0 slots: virtual column)
 fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
     if col_idx == 0 {
         return 0;
@@ -407,8 +412,8 @@ fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
     for k in 1..col_idx {
         let ct = col_type_ints.get(k).copied().unwrap_or(0) as u8;
         match ct {
-            8 => ci += 2,  // Timestamp: seconds + fractionals = 2 cluster slots
-            13 => {}       // BackLink: virtual, 0 cluster slots
+            8 => ci += 2,  // Timestamp: seconds + nanoseconds = 2 cluster slots
+            14 => {}       // BackLink: virtual column, 0 cluster slots
             17 => ci += 2, // UUID: 2 cluster slots (v24+)
             _ => ci += 1,
         }

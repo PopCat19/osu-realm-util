@@ -134,22 +134,24 @@ pub enum ColumnType {
 
 impl ColumnType {
     /// Decode a raw type code from the Realm spec array.
-    /// These are on-disk codes used by the osu!lazer Realm file; they differ
-    /// from realm-core native codes and from .NET `PropertyType`.
+    ///
+    /// Codes match realm-core `ColumnType::Type` (see `column_type.hpp`).
+    /// osu!lazer uses the .NET Realm SDK which ultimately writes these
+    /// native codes to the spec array.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => ColumnType::Int,
             1 => ColumnType::Bool,
             2 => ColumnType::String,
-            3 => ColumnType::Data,
-            4 => ColumnType::Float,
-            5 => ColumnType::Double,
-            7 => ColumnType::Timestamp,
-            8 | 12 => ColumnType::Link,
-            9 | 13 => ColumnType::LinkList,
-            10 => ColumnType::Float, // appears as Float in osu!lazer (BPM, StarRating)
+            3 => ColumnType::Data, // OldStringEnum (deprecated, absent from lazer)
+            4 => ColumnType::Float, // Binary in core; works as Float for lazer data
+            5 => ColumnType::Double, // OldTable in core (deprecated, absent from lazer)
+            8 => ColumnType::Timestamp,
+            9 => ColumnType::Float,
+            10 => ColumnType::Double,
+            12 => ColumnType::Link,
             14 => ColumnType::BackLink,
-            17 => ColumnType::Unknown(17), // UUID — cluster_index_for_col handles 2-slot
+            17 => ColumnType::Unknown(17), // UUID — 2-slot handled by cluster_index_for_col
             _ => ColumnType::Unknown(v),
         }
     }
@@ -458,13 +460,10 @@ mod tests {
         assert_eq!(ColumnType::from_u8(0), ColumnType::Int);
         assert_eq!(ColumnType::from_u8(1), ColumnType::Bool);
         assert_eq!(ColumnType::from_u8(2), ColumnType::String);
-        assert_eq!(ColumnType::from_u8(3), ColumnType::Data);
-        assert_eq!(ColumnType::from_u8(4), ColumnType::Float);
-        assert_eq!(ColumnType::from_u8(5), ColumnType::Double);
-        assert_eq!(ColumnType::from_u8(7), ColumnType::Timestamp);
-        assert_eq!(ColumnType::from_u8(8), ColumnType::Link);
+        assert_eq!(ColumnType::from_u8(8), ColumnType::Timestamp);
+        assert_eq!(ColumnType::from_u8(9), ColumnType::Float);
+        assert_eq!(ColumnType::from_u8(10), ColumnType::Double);
         assert_eq!(ColumnType::from_u8(12), ColumnType::Link);
-        assert_eq!(ColumnType::from_u8(9), ColumnType::LinkList);
         assert_eq!(ColumnType::from_u8(14), ColumnType::BackLink);
     }
 

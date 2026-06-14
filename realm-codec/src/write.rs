@@ -313,11 +313,12 @@ fn col_type_code(ct: ColumnType) -> u8 {
         ColumnType::Bool => 1,
         ColumnType::String => 2,
         ColumnType::Data => 3,
-        ColumnType::Float => 4,
-        ColumnType::Double => 5,
-        ColumnType::Timestamp => 7,
-        ColumnType::Link | ColumnType::BackLink => 8,
-        ColumnType::LinkList => 9,
+        ColumnType::Float => 9,
+        ColumnType::Double => 10,
+        ColumnType::Timestamp => 8,
+        ColumnType::Link => 12,
+        ColumnType::LinkList => 12, // stored as Link in spec, link-list implied by attr
+        ColumnType::BackLink => 14,
         ColumnType::Unknown(v) => v,
     }
 }
