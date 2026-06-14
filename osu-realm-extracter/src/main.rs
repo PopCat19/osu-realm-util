@@ -24,11 +24,6 @@ fn main() {
         }
     };
 
-    let mut total_rows = 0;
-    let mut tables_ok = 0u32;
-    let mut tables_partial = 0u32;
-    let mut tables_broken = 0u32;
-
     for t in realm.tables().iter() {
         let cols_bad = t
             .columns
@@ -36,16 +31,13 @@ fn main() {
             .filter(|(n, _)| n.is_empty() || n.starts_with('\0') || n.len() >= 100)
             .count();
         let status = if cols_bad > 0 {
-            tables_partial += 1;
             "\u{26a0}  garbled cols"
         } else if t.rows.is_empty()
             && !t.columns.is_empty()
             && t.name != "dotnet_guid_representation_fixed"
         {
-            tables_broken += 1;
             "\u{2717}  empty"
         } else {
-            tables_ok += 1;
             ""
         };
         println!(
@@ -55,14 +47,5 @@ fn main() {
             t.columns.len(),
             status
         );
-        total_rows += t.rows.len();
     }
-    println!(
-        "  ─────────────────────────────────────────\n  {} tables: {} ok, {} partial, {} broken | {} total rows",
-        realm.tables().len(),
-        tables_ok,
-        tables_partial,
-        tables_broken,
-        total_rows
-    );
 }
