@@ -29,6 +29,10 @@ osu-realm-util merge [CLIENT.REALM] EXISTING.DB
 Default paths: `~/.local/share/osu/client.realm` for Realm,
 `~/Documents/osu!/collection.db` for the `col` command.
 
+**Update workflow**: run `merge` to pull lazer collections into your
+stable `collection.db`. Preserves your existing collections; same-name
+collections take lazer's hashes and append any stable-only hashes.
+
 ## Structure
 
 ```
@@ -52,10 +56,14 @@ osu-realm-util/          monorepo root
 nix run github:PopCat19/osu-realm-util
 nix run github:PopCat19/osu-realm-util -- col
 nix run github:PopCat19/osu-realm-util -- realm2col /tmp/out.db
-nix run github:PopCat19/osu-realm-util -- merge /tmp/out.db
+nix run github:PopCat19/osu-realm-util -- merge ~/Documents/osu!/collection.db
 
 # Install to profile
 nix profile install github:PopCat19/osu-realm-util
+nix profile upgrade osu-realm-util      # pull latest commit
+
+# Pin to a specific commit (reproducible)
+nix profile install github:PopCat19/osu-realm-util/0fa5d52
 
 # Flake input in another flake
 inputs.osu-realm-util.url = "github:PopCat19/osu-realm-util";
