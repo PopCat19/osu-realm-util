@@ -97,12 +97,12 @@ fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
 
         for ec in &existing.collections {
             if let Some(rc) = collections.iter_mut().find(|c| c.name == ec.name) {
-                let existing_hashes: BTreeSet<&str> = ec.beatmap_hashes.iter().map(|s| s.as_str()).collect();
-                for h in &ec.beatmap_hashes {
-                    if !existing_hashes.contains(h.as_str()) {
-                        rc.beatmap_hashes.push(h.clone());
-                    }
-                }
+                let lazer_hashes: BTreeSet<&str> = rc.beatmap_hashes.iter().map(|s| s.as_str()).collect();
+                let mut extra: Vec<String> = ec.beatmap_hashes.iter()
+                    .filter(|h| !lazer_hashes.contains(h.as_str()))
+                    .cloned()
+                    .collect();
+                rc.beatmap_hashes.append(&mut extra);
             } else {
                 collections.push(ec.clone());
             }
