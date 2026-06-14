@@ -201,7 +201,7 @@ mod tests {
     fn real_file_parse() {
         let db = CollectionDb::open("/home/popcat19/Documents/osu!/collection.db").unwrap();
         assert!(db.version > 0);
-        assert!(db.collections.len() > 0);
+        assert!(!db.collections.is_empty());
         for c in &db.collections {
             assert!(!c.name.is_empty() || c.beatmap_hashes.is_empty());
             for h in &c.beatmap_hashes {
