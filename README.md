@@ -15,6 +15,7 @@ Utility for reading osu! Realm databases (lazer `client.realm`) and legacy osu!s
 ```
 # List lazer client.realm tables
 osu-realm-util
+osu-realm-util ls
 
 # List stable collection.db
 osu-realm-util col [COLLECTION.DB]
@@ -26,8 +27,9 @@ osu-realm-util realm2col [CLIENT.REALM] OUT.DB
 osu-realm-util merge [CLIENT.REALM] EXISTING.DB
 ```
 
-Default paths: `~/.local/share/osu/client.realm` for Realm,
-`~/Documents/osu!/collection.db` for the `col` command.
+Default paths use `$HOME`-based resolution. Override with env vars:
+- `OSU_REALM_PATH` — path to `client.realm`
+- `OSU_COLLECTION_DB` — path to stable `collection.db`
 
 **Update workflow**: run `merge` to pull lazer collections into your
 stable `collection.db`. Preserves your existing collections; same-name
@@ -53,7 +55,7 @@ osu-realm-util/          monorepo root
 
 ```nix
 # Run without installing
-nix run github:PopCat19/osu-realm-util
+nix run github:PopCat19/osu-realm-util -- ls
 nix run github:PopCat19/osu-realm-util -- col
 nix run github:PopCat19/osu-realm-util -- realm2col /tmp/out.db
 nix run github:PopCat19/osu-realm-util -- merge ~/Documents/osu!/collection.db

@@ -133,7 +133,9 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
-    /// Decode a raw 4-bit type code from the Realm spec array.
+    /// Decode a raw type code from the Realm spec array.
+    /// These are on-disk codes used by the osu!lazer Realm file; they differ
+    /// from realm-core native codes and from .NET `PropertyType`.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => ColumnType::Int,
@@ -145,8 +147,10 @@ impl ColumnType {
             7 => ColumnType::Timestamp,
             8 | 12 => ColumnType::Link,
             9 | 13 => ColumnType::LinkList,
+            10 => ColumnType::Float, // appears as Float in osu!lazer (BPM, StarRating)
             14 => ColumnType::BackLink,
-            other => ColumnType::Unknown(other),
+            17 => ColumnType::Unknown(17), // UUID — cluster_index_for_col handles 2-slot
+            _ => ColumnType::Unknown(v),
         }
     }
 }

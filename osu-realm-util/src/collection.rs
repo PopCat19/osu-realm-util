@@ -205,8 +205,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local osu! installation"]
     fn real_file_parse() {
-        let db = CollectionDb::open("/home/popcat19/Documents/osu!/collection.db").unwrap();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = std::env::var("OSU_COLLECTION_DB")
+            .unwrap_or_else(|_| format!("{home}/Documents/osu!/collection.db"));
+        let db = CollectionDb::open(&path).unwrap();
         assert!(db.version > 0);
         assert!(!db.collections.is_empty());
         for c in &db.collections {

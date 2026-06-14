@@ -19,7 +19,9 @@ fn main() {
         "col" => cmd_collections(&args),
         "realm2col" => cmd_realm_to_collection_db(&args, false),
         "merge" => cmd_realm_to_collection_db(&args, true),
-        _ => print_usage(),
+        "ls" => cmd_list_tables(&args),
+        "help" | "-h" | "--help" => print_usage(),
+        _ => cmd_list_tables(&args),
     }
 }
 
@@ -29,17 +31,64 @@ fn print_usage() {
 osu-realm-util
 
 Commands:
-  col [DB]             list stable collection.db contents
-  realm2col [REALM] DB  export lazer BeatmapCollection → new collection.db
-  merge [REALM] DB      merge lazer BeatmapCollection into existing collection.db"
+  ls [REALM]            list tables and columns from client.realm
+  col [DB]               list stable collection.db contents
+  realm2col [REALM] DB   export lazer BeatmapCollection to new collection.db
+  merge [REALM] DB       merge lazer BeatmapCollection into existing collection.db
+
+Environment:
+  OSU_REALM_PATH         path to client.realm (default: ~/.local/share/osu/client.realm)
+  OSU_COLLECTION_DB      path to stable collection.db (default: ~/Documents/osu!/collection.db)"
     );
 }
 
+fn osu_realm_path() -> String {
+    std::env::var("OSU_REALM_PATH").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/.local/share/osu/client.realm")
+    })
+}
+
+fn osu_collection_path() -> String {
+    std::env::var("OSU_COLLECTION_DB").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/Documents/osu!/collection.db")
+    })
+}
+
+fn cmd_list_tables(args: &[String]) {
+    let path_owned;
+    let realm_path = match args.get(2) {
+        Some(p) => p.as_str(),
+        None => {
+            path_owned = osu_realm_path();
+            &path_owned
+        }
+    };
+    let realm = RealmFile::open(realm_path).expect("failed to open realm file");
+    for table in realm.tables() {
+        println!(
+            "{} ({} rows, {} cols)",
+            table.name,
+            table.rows.len(),
+            table.columns.len()
+        );
+        if args.len() >= 3 {
+            for (name, col_type) in &table.columns {
+                println!("  {:30} {:?}", name, col_type);
+            }
+        }
+    }
+}
+
 fn cmd_collections(args: &[String]) {
-    let path = args
-        .get(2)
-        .map(|s| s.as_str())
-        .unwrap_or("/home/popcat19/Documents/osu!/collection.db");
+    let default_path;
+    let path = if let Some(p) = args.get(2) {
+        p.as_str()
+    } else {
+        default_path = osu_collection_path();
+        &default_path
+    };
     let db = collection::CollectionDb::open(path).expect("failed to open collection.db");
     let total: usize = db.collections.iter().map(|c| c.beatmap_hashes.len()).sum();
     println!(
@@ -54,21 +103,20 @@ fn cmd_collections(args: &[String]) {
 }
 
 fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
-    // Arg layout: cmd [REALM] DB
     let (realm_path, out_path) = match &args[2..] {
         [] => {
             eprintln!("usage: {} DB", if merge { "merge" } else { "realm2col" });
             return;
         }
-        [db] => ("/home/popcat19/.local/share/osu/client.realm", db.as_str()),
-        [realm, db] => (realm.as_str(), db.as_str()),
+        [db] => (osu_realm_path(), db.to_string()),
+        [realm, db] => (realm.to_string(), db.to_string()),
         _ => {
             eprintln!("too many arguments");
             return;
         }
     };
 
-    let realm = RealmFile::open(realm_path).expect("failed to open realm file");
+    let realm = RealmFile::open(&realm_path).expect("failed to open realm file");
     let tbl = realm
         .table("class_BeatmapCollection")
         .expect("BeatmapCollection table not found");
@@ -105,7 +153,7 @@ fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
 
     if merge {
         let existing =
-            collection::CollectionDb::open(out_path).unwrap_or(collection::CollectionDb {
+            collection::CollectionDb::open(&out_path).unwrap_or(collection::CollectionDb {
                 version: 20250207,
                 collections: vec![],
             });
@@ -125,9 +173,12 @@ fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
                 collections.push(ec.clone());
             }
         }
-        // Realm-originated collections already won the merge for same-name entries.
-        // Sort for deterministic output.
         collections.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    // Sort hashes within each collection for deterministic output
+    for c in &mut collections {
+        c.beatmap_hashes.sort();
     }
 
     let db = collection::CollectionDb {
@@ -135,7 +186,7 @@ fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
         collections,
     };
 
-    db.save(out_path).expect("failed to write collection.db");
+    db.save(&out_path).expect("failed to write collection.db");
     let total: usize = db.collections.iter().map(|c| c.beatmap_hashes.len()).sum();
     println!(
         "{} → {} collections, {} maps",

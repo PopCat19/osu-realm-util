@@ -26,13 +26,12 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
-            doCheck = false;
+            checkPhase = ''
+              cargo test --workspace -- --skip real_file_parse
+            '';
             meta = with pkgs.lib; {
               description = "Read osu! Realm databases and legacy collection.db files";
-              license = with licenses; [
-                mit
-                asl20
-              ];
+              license = licenses.mit;
               mainProgram = "osu-realm-util";
             };
           };
@@ -73,12 +72,13 @@
           RUST_BACKTRACE = "1";
           shellHook = ''
             echo "🦀 osu-realm-util devshell"
-            echo "  cargo build               -- build"
-            echo "  cargo run                  -- test with default client.realm"
-            echo "  cargo run ~/path/to/client.realm"
-            echo "  cargo clippy -- -D warnings  -- lint"
-            echo "  cargo fmt -- --check          -- check formatting"
-            echo "  nix fmt                      -- format .nix files"
+            echo "  cargo run                  -- list tables from default client.realm"
+            echo "  cargo run -- col            -- list collections from default collection.db"
+            echo "  cargo run -- realm2col DB   -- export lazer collections"
+            echo "  cargo run -- merge DB       -- merge lazer into existing collection.db"
+            echo "  cargo clippy -- -D warnings -- lint"
+            echo "  cargo fmt -- --check        -- check formatting"
+            echo "  nix fmt                     -- format .nix files"
           '';
         };
       }

@@ -227,9 +227,9 @@ fn read_table(data: &[u8], name: &str, table_ref: usize) -> Result<RealmTable> {
 /// Build a `RealmTable` from a Realm SDK 5+ cluster-tree table.
 ///
 /// Cluster layout:
-///   cluster[0]   = col[0] (primary key column — always a string in practice)
-///   cluster[1]   = pk_index B+ tree (skip — not a data column)
-///   cluster[2..] = col[1], col[2], ...  with these exceptions:
+///   `cluster[0]`   = col\[0\] (primary key column — always a string)
+///   `cluster[1]`   = pk_index B+ tree (skip — not a data column)
+///   `cluster[2..]` = col\[1\], col\[2\], ...  with these exceptions:
 ///     type 8  (Timestamp) occupies 2 slots (seconds + fractionals)
 ///     type 13 (BackLink)  occupies 0 slots (virtual column, no cluster entry)
 fn read_table_new(
@@ -395,8 +395,8 @@ fn collect_list_column_new(
 
 /// Map a column index to its position in the cluster root array.
 ///
-/// col[0] → cluster[0]; pk_index at cluster[1] is skipped.
-/// For col[k ≥ 1]: start at cluster[2] and account for multi-slot types
+/// col\[0\] → cluster\[0\]; pk_index at cluster\[1\] is skipped.
+/// For col\[k ≥ 1\]: start at cluster\[2\] and account for multi-slot types
 /// encountered in cols 1..k-1 (type 8 = 2 slots, type 13 = 0 slots).
 fn cluster_index_for_col(col_idx: usize, col_type_ints: &[u64]) -> usize {
     if col_idx == 0 {
@@ -523,9 +523,9 @@ fn collect_cluster_column_new_inner(
 }
 
 /// Read a compact-string layout spread across multiple leaf-of-refs slots:
-/// slot[0] = offsets array (16-bit or 8-bit ints)
-/// slot[1] = blob (wtype=2 null-separated strings)
-/// slot[2] = null bitmap (wtype=0, 1-bit), optional
+/// slot\[0\] = offsets array (16-bit or 8-bit ints)
+/// slot\[1\] = blob (wtype=2 null-separated strings)
+/// slot\[2\] = null bitmap (wtype=0, 1-bit), optional
 fn read_partitioned_compact_string(data: &[u8], refs: &[u64]) -> Vec<Value> {
     let offsets_ref = refs[0] as usize;
     let blob_ref = refs[1] as usize;
@@ -576,7 +576,7 @@ fn collect_leaf_values_new(
             .into_iter()
             .map(|v| Value::Timestamp(v as i64))
             .collect(),
-        ColumnType::Float | ColumnType::Double | ColumnType::Unknown(10) => {
+        ColumnType::Float | ColumnType::Double => {
             let ints = collect_ints_new(data, leaf_ref);
             ints.into_iter()
                 .map(|v| Value::Float(f64::from_bits(v)))
@@ -594,9 +594,7 @@ fn value_from_int(v: u64, col_type: ColumnType) -> Value {
         ColumnType::Bool => Value::Bool(v != 0),
         ColumnType::Int => Value::Int(v as i64),
         ColumnType::Timestamp => Value::Timestamp(v as i64),
-        ColumnType::Float | ColumnType::Double | ColumnType::Unknown(10) => {
-            Value::Float(f64::from_bits(v))
-        }
+        ColumnType::Float | ColumnType::Double => Value::Float(f64::from_bits(v)),
         _ => Value::Int(v as i64),
     }
 }
