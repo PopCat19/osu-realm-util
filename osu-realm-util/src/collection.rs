@@ -175,6 +175,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_semantics() {
+        // lazer has [A→[h₁,h₂], B→[h₃]]
+        // stable has [A→[h₁,h₉₉], C→[h₄]]
+        // Expect A→[h₁,h₂,h₉₉] (lazer wins + stable-only appended),
+        //        B→[h₃] (lazer only, unchanged),
+        //        C→[h₄] (stable only, preserved)
+        let mut lazer: Vec<Collection> = vec![
+            Collection {
+                name: "A".into(),
+                beatmap_hashes: vec!["h1".into(), "h2".into()],
+            },
+            Collection {
+                name: "B".into(),
+                beatmap_hashes: vec!["h3".into()],
+            },
+        ];
+        let stable: Vec<Collection> = vec![
+            Collection {
+                name: "A".into(),
+                beatmap_hashes: vec!["h1".into(), "h99".into()],
+            },
+            Collection {
+                name: "C".into(),
+                beatmap_hashes: vec!["h4".into()],
+            },
+        ];
+        for sc in &stable {
+            if let Some(lc) = lazer.iter_mut().find(|c| c.name == sc.name) {
+                let lset: std::collections::BTreeSet<&str> =
+                    lc.beatmap_hashes.iter().map(|s| s.as_str()).collect();
+                let mut extra: Vec<String> = sc
+                    .beatmap_hashes
+                    .iter()
+                    .filter(|h| !lset.contains(h.as_str()))
+                    .cloned()
+                    .collect();
+                lc.beatmap_hashes.append(&mut extra);
+            } else {
+                lazer.push(sc.clone());
+            }
+        }
+        lazer.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(lazer.len(), 3);
+        assert_eq!(lazer[0].name, "A");
+        assert_eq!(lazer[0].beatmap_hashes, vec!["h1", "h2", "h99"]);
+        assert_eq!(lazer[1].name, "B");
+        assert_eq!(lazer[1].beatmap_hashes, vec!["h3"]);
+        assert_eq!(lazer[2].name, "C");
+        assert_eq!(lazer[2].beatmap_hashes, vec!["h4"]);
+    }
+
+    #[test]
     fn parse_roundtrip() {
         let data = {
             let mut d = Vec::new();

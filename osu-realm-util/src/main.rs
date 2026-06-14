@@ -83,23 +83,85 @@ fn cmd_list_tables(args: &[String]) {
 
 fn cmd_collections(args: &[String]) {
     let default_path;
-    let path = if let Some(p) = args.get(2) {
-        p.as_str()
+    let mut json = false;
+    let mut path_arg = None;
+    for arg in args.iter().skip(2) {
+        if arg == "--json" {
+            json = true;
+        } else if !arg.starts_with('-') {
+            path_arg = Some(arg.as_str());
+        }
+    }
+    let path = if let Some(p) = path_arg {
+        p
     } else {
         default_path = osu_collection_path();
         &default_path
     };
     let db = collection::CollectionDb::open(path).expect("failed to open collection.db");
     let total: usize = db.collections.iter().map(|c| c.beatmap_hashes.len()).sum();
-    println!(
-        "{}: {} collections, {} maps",
-        path,
-        db.collections.len(),
-        total
-    );
-    for c in &db.collections {
-        println!("  {:30} → {}", c.name, c.beatmap_hashes.len());
+    if json {
+        print_collections_json(&db, total);
+    } else {
+        println!(
+            "{}: {} collections, {} maps",
+            path,
+            db.collections.len(),
+            total
+        );
+        for c in &db.collections {
+            println!("  {:30} → {}", c.name, c.beatmap_hashes.len());
+        }
     }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn print_collections_json(db: &collection::CollectionDb, total: usize) {
+    println!("{{");
+    println!("  \"version\": {},", db.version);
+    println!("  \"total_collections\": {},", db.collections.len());
+    println!("  \"total_maps\": {},", total);
+    println!("  \"collections\": [");
+    for (ci, c) in db.collections.iter().enumerate() {
+        let comma = if ci + 1 < db.collections.len() {
+            ","
+        } else {
+            ""
+        };
+        println!("    {{");
+        println!("      \"name\": {},", json_escape(&c.name));
+        println!("      \"count\": {},", c.beatmap_hashes.len());
+        println!("      \"hashes\": [");
+        for (hi, h) in c.beatmap_hashes.iter().enumerate() {
+            let hc = if hi + 1 < c.beatmap_hashes.len() {
+                ","
+            } else {
+                ""
+            };
+            println!("        {}{hc}", json_escape(h));
+        }
+        println!("      ]");
+        println!("    }}{comma}");
+    }
+    println!("  ]");
+    println!("}}");
 }
 
 fn cmd_realm_to_collection_db(args: &[String], merge: bool) {
