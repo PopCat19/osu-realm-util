@@ -490,8 +490,9 @@ fn collect_cluster_column_new_inner(
                 values.extend(sub);
             } else {
                 let block_vals = collect_leaf_values_new(data, row_node_ref, &row_hdr, col_type);
+                let n = block_vals.len();
                 values.extend(block_vals);
-                *total_out += block_vals.len() as u32;
+                *total_out += n as u32;
             }
         }
         return values;
