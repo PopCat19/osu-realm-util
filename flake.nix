@@ -42,7 +42,7 @@
         };
 
         devShells.default = pkgs.mkShell {
-          name = "osu-realm-extracter";
+          name = "osu-realm-util";
           packages = with pkgs; [
             rustc
             cargo
@@ -53,7 +53,7 @@
           ];
           RUST_BACKTRACE = "1";
           shellHook = ''
-            echo "🦀 osu-realm-extracter devshell"
+            echo "🦀 osu-realm-util devshell"
             echo "  cargo build               -- build"
             echo "  cargo run                  -- test with default client.realm"
             echo "  cargo run ~/path/to/client.realm"

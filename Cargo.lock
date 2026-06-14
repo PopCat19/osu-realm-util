@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "osu-realm-extracter"
+name = "osu-realm-util"
 version = "0.1.0"
 dependencies = [
  "realm-codec-rs",
