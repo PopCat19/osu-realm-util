@@ -5,19 +5,29 @@ Utility for reading osu! Realm databases (lazer `client.realm`) and legacy osu!s
 ## Features
 
 - Parse Realm v24 binary databases into tables, columns, and typed rows
-- Read osu!stable `collection.db` collections and beatmap hashes
+- Read osu!stable `collection.db` collections, write and merge them
+- Export lazer `BeatmapCollection` table to stable `collection.db` format
 - Write Realm v9 databases from scratch (`realm-codec` writer)
 - Nix flake: devshell + checks (clippy, rustfmt, nixfmt)
 
 ## Usage
 
 ```
-# Lazer client.realm (table listing)
-cargo run --release
+# List lazer client.realm tables
+osu-realm-util
 
-# osu!stable collection.db
-cargo run -- col
+# List stable collection.db
+osu-realm-util col [COLLECTION.DB]
+
+# Export lazer collections → new collection.db
+osu-realm-util realm2col [CLIENT.REALM] OUT.DB
+
+# Merge lazer collections into existing collection.db
+osu-realm-util merge [CLIENT.REALM] EXISTING.DB
 ```
+
+Default paths: `~/.local/share/osu/client.realm` for Realm,
+`~/Documents/osu!/collection.db` for the `col` command.
 
 ## Structure
 
